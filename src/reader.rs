@@ -15,6 +15,7 @@ use gtk::{
 use crate::{
     epub::{BlockKind, Chapter, Epub},
     progress::{FocusLevel, Position, ReadingState, Store},
+    speech::Speech,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -118,6 +119,7 @@ fn build(
         initial.position,
     )));
     let transition_generation = Rc::new(Cell::new(0_u64));
+    let speech = Rc::new(Speech::new());
 
     let list = ListBox::new();
     list.set_selection_mode(gtk::SelectionMode::None);
@@ -173,6 +175,7 @@ fn build(
         let document = Rc::clone(&document);
         let current_chapter = Rc::clone(&current_chapter);
         let outcome = Rc::clone(&outcome);
+        let speech = Rc::clone(&speech);
         let path = path.clone();
         keys.connect_key_pressed(move |_, key, _, _| {
             let mut rebuild = false;
@@ -186,6 +189,7 @@ fn build(
             let mut open_at_end = false;
             match key {
                 gdk::Key::q => {
+                    speech.stop();
                     outcome.set(Exit::Quit);
                     save(
                         &path,
@@ -200,6 +204,7 @@ fn build(
                     return glib::Propagation::Stop;
                 }
                 gdk::Key::Escape => {
+                    speech.stop();
                     outcome.set(Exit::Library);
                     save(
                         &path,
@@ -272,8 +277,20 @@ fn build(
                     }
                     return glib::Propagation::Stop;
                 }
+                gdk::Key::s => {
+                    let passage = &passages.borrow()[current.get()];
+                    let selected =
+                        selected_text(&list, visible_index(&passages.borrow(), current.get()));
+                    speech.speak(selected.as_deref().unwrap_or(&passage.text));
+                    return glib::Propagation::Stop;
+                }
+                gdk::Key::x => {
+                    speech.stop();
+                    return glib::Propagation::Stop;
+                }
                 _ => return glib::Propagation::Proceed,
             }
+            speech.stop();
             if let Some(target) = target_chapter {
                 let focus = state.borrow().focus;
                 match load_readable_chapter(
@@ -497,23 +514,26 @@ fn fade_passages(
     });
 }
 
-fn show_dictionary(list: &ListBox, active: usize, parent: &ApplicationWindow) {
-    let Some(label) = list
-        .row_at_index(active as i32)
-        .and_then(|row| row.child())
-        .and_then(|child| child.downcast::<Label>().ok())
-    else {
-        return;
-    };
-    let Some((start, end)) = label.selection_bounds() else {
-        return;
-    };
+fn selected_text(list: &ListBox, active: usize) -> Option<String> {
+    let label = list
+        .row_at_index(active as i32)?
+        .child()?
+        .downcast::<Label>()
+        .ok()?;
+    let (start, end) = label.selection_bounds()?;
     let selected = label
         .text()
         .chars()
         .skip(start.max(0) as usize)
         .take(end.saturating_sub(start) as usize)
         .collect::<String>();
+    (!selected.trim().is_empty()).then_some(selected)
+}
+
+fn show_dictionary(list: &ListBox, active: usize, parent: &ApplicationWindow) {
+    let Some(selected) = selected_text(list, active) else {
+        return;
+    };
     let word = selected
         .trim()
         .trim_matches(|character: char| !character.is_alphanumeric());

@@ -12,7 +12,21 @@
         let pkgs = nixpkgs.legacyPackages.${system};
         in {
           default = pkgs.mkShell {
-            packages = with pkgs; [ cargo clippy pkg-config rustc rustfmt ];
+            packages = with pkgs; [
+              cargo
+              clippy
+              espeak-ng
+              pkg-config
+              pipewire
+              rustc
+              rustfmt
+              (python3.withPackages (python: with python; [
+                kokoro
+                numpy
+                soundfile
+                spacy-models.en_core_web_sm
+              ]))
+            ];
             buildInputs = with pkgs; [ gtk4 ];
           };
         });

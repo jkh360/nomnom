@@ -2,6 +2,7 @@ mod epub;
 mod library;
 mod progress;
 mod reader;
+mod speech;
 
 use std::{env, path::PathBuf, process};
 
