@@ -275,12 +275,13 @@ fn build(
                 _ => return glib::Propagation::Proceed,
             }
             if let Some(target) = target_chapter {
+                let focus = state.borrow().focus;
                 match load_readable_chapter(
                     &mut document.borrow_mut(),
                     target,
                     target >= active_chapter,
                     chapter_count,
-                    state.borrow().focus,
+                    focus,
                 ) {
                     Ok(Some((chapter_index, chapter, loaded_passages))) => {
                         *current_chapter.borrow_mut() = chapter;
@@ -667,7 +668,7 @@ fn save(
 }
 fn install_css() {
     let css = gtk::CssProvider::new();
-    css.load_from_data("window { background: #1d2021; color: #ebdbb2; } .passages { background: #1d2021; } row, row:focus, row:focus-visible, row:selected { outline: none; border: none; box-shadow: none; background: transparent; } .passage { color: #ebdbb2; line-height: 1.45; } .heading { font-weight: 700; } .quote { border-left: 3px solid #928374; padding-left: 20px; } .status { color: #a89984; font-size: 13px; }");
+    css.load_from_data("window { background: #1d2021; color: #ebdbb2; } .passages { background: #1d2021; } row, row:focus, row:focus-visible, row:selected, .passage:focus, .passage:focus-visible { outline: none; border: none; box-shadow: none; background: transparent; } .passage { color: #ebdbb2; line-height: 1.45; } .heading { font-weight: 700; } .quote { border-left: 3px solid #928374; padding-left: 20px; } .status { color: #a89984; font-size: 13px; }");
     if let Some(display) = gdk::Display::default() {
         gtk::style_context_add_provider_for_display(
             &display,
