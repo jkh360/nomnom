@@ -115,7 +115,7 @@ fn build(
     center_current(
         &list,
         &scroller,
-        current.get(),
+        visible_index(&passages.borrow(), current.get()),
         false,
         Rc::clone(&animation_generation),
         animation_generation.get(),
@@ -190,6 +190,14 @@ fn build(
                 }
                 _ => return glib::Propagation::Proceed,
             }
+            if passages
+                .borrow()
+                .get(previous)
+                .zip(passages.borrow().get(next))
+                .is_some_and(|(from, to)| from.chapter != to.chapter)
+            {
+                rebuild = true;
+            }
             current.set(next);
             let generation = animation_generation.get().wrapping_add(1);
             animation_generation.set(generation);
@@ -198,19 +206,23 @@ fn build(
             } else if next != previous {
                 animate_transition(
                     &list,
-                    previous,
-                    next,
+                    visible_index(&passages.borrow(), previous),
+                    visible_index(&passages.borrow(), next),
                     state.borrow().font_size,
                     Rc::clone(&animation_generation),
                     generation,
                 );
             } else {
-                style_rows(&list, next, state.borrow().font_size);
+                style_rows(
+                    &list,
+                    visible_index(&passages.borrow(), next),
+                    state.borrow().font_size,
+                );
             }
             center_current(
                 &list,
                 &scroller,
-                next,
+                visible_index(&passages.borrow(), next),
                 !rebuild && next != previous,
                 Rc::clone(&animation_generation),
                 generation,
@@ -289,7 +301,8 @@ fn populate(list: &ListBox, passages: &[Passage], active: usize, font_size: i32)
     while let Some(child) = list.first_child() {
         list.remove(&child);
     }
-    for passage in passages {
+    let chapter = passages.get(active).map_or(0, |passage| passage.chapter);
+    for passage in passages.iter().filter(|passage| passage.chapter == chapter) {
         let label = Label::new(Some(&passage.text));
         label.set_wrap(true);
         label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
@@ -310,7 +323,17 @@ fn populate(list: &ListBox, passages: &[Passage], active: usize, font_size: i32)
         row.set_child(Some(&label));
         list.append(&row);
     }
-    style_rows(list, active, font_size);
+    style_rows(list, visible_index(passages, active), font_size);
+}
+
+fn visible_index(passages: &[Passage], active: usize) -> usize {
+    let Some(current) = passages.get(active) else {
+        return 0;
+    };
+    passages[..active]
+        .iter()
+        .filter(|passage| passage.chapter == current.chapter)
+        .count()
 }
 fn style_rows(list: &ListBox, active: usize, font_size: i32) {
     let mut index = 0;
@@ -360,11 +383,11 @@ fn animate_transition(
     outgoing.set_opacity(1.0);
     incoming.set_opacity(0.18);
     let started = std::time::Instant::now();
-    glib::timeout_add_local(Duration::from_millis(16), move || {
+    glib::timeout_add_local(Duration::from_millis(33), move || {
         if animation_generation.get() != generation {
             return glib::ControlFlow::Break;
         }
-        let progress = (started.elapsed().as_secs_f64() / 0.38).clamp(0.0, 1.0);
+        let progress = (started.elapsed().as_secs_f64() / 0.24).clamp(0.0, 1.0);
         let eased = progress * progress * (3.0 - 2.0 * progress);
         outgoing.set_opacity(1.0 - eased * 0.82);
         incoming.set_opacity(0.18 + eased * 0.82);
@@ -401,11 +424,11 @@ fn center_current(
         let start = adjustment.value();
         let distance = target - start;
         let started = std::time::Instant::now();
-        glib::timeout_add_local(Duration::from_millis(16), move || {
+        glib::timeout_add_local(Duration::from_millis(33), move || {
             if animation_generation.get() != generation {
                 return glib::ControlFlow::Break;
             }
-            let progress = (started.elapsed().as_secs_f64() / 0.34).clamp(0.0, 1.0);
+            let progress = (started.elapsed().as_secs_f64() / 0.22).clamp(0.0, 1.0);
             let eased = if progress < 0.5 {
                 4.0 * progress * progress * progress
             } else {
@@ -487,6 +510,11 @@ fn save(path: &Path, passages: &[Passage], current: usize, state: &ReadingState)
     let mut saved = *state;
     saved.position = passage_position(passages, current);
     saved.completed = current + 1 == passages.len();
+    saved.percent = if passages.is_empty() {
+        0
+    } else {
+        (((current + 1) as f64 / passages.len() as f64) * 100.0).round() as usize
+    };
     if let Ok(store) = Store::open() {
         if let Err(error) = store.save(path, saved) {
             eprintln!("nomnom: failed to save progress: {error:#}");

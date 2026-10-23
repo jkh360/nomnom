@@ -88,7 +88,6 @@ struct Preview {
     metadata: Metadata,
     chapters: usize,
     state: ReadingState,
-    book_percent: usize,
     image: Option<StatefulProtocol>,
 }
 
@@ -287,11 +286,10 @@ fn entries(directory: &Path) -> Result<Vec<Entry>> {
         .collect::<Vec<_>>();
     if let Some((path, state)) = Store::open()?.most_recent(&books)? {
         let (title, chapters) = book_identity(&path);
-        let book_percent = book_percent(&path, state).unwrap_or(0);
         values.push(Entry::LastRead {
             path,
             title,
-            progress: progress_label(state, chapters, book_percent),
+            progress: progress_label(state, chapters),
         });
     }
     values.extend(books.into_iter().map(|path| {
@@ -307,39 +305,15 @@ fn book_identity(path: &Path) -> (String, usize) {
         .unwrap_or_else(|_| (name(path), 0))
 }
 
-fn progress_label(state: ReadingState, chapters: usize, book_percent: usize) -> String {
+fn progress_label(state: ReadingState, chapters: usize) -> String {
     let current = state
         .position
         .chapter
         .saturating_add(1)
         .min(chapters.max(1));
-    format!("chapter {current}/{chapters}  ·  {book_percent}% of book")
-}
-
-fn book_percent(path: &Path, state: ReadingState) -> Result<usize> {
-    if state.completed {
-        return Ok(100);
-    }
-    let mut book = Epub::open(path)?;
-    let chapters = book.chapters()?;
-    let total_blocks = chapters
-        .iter()
-        .map(|chapter| chapter.blocks.len())
-        .sum::<usize>();
-    if total_blocks == 0 {
-        return Ok(0);
-    }
-    let completed_chapters = chapters
-        .iter()
-        .take(state.position.chapter.min(chapters.len()))
-        .map(|chapter| chapter.blocks.len())
-        .sum::<usize>();
-    let completed_in_chapter = chapters
-        .get(state.position.chapter)
-        .map_or(0, |chapter| state.position.block.min(chapter.blocks.len()));
-    Ok(
-        ((completed_chapters + completed_in_chapter) as f64 / total_blocks as f64 * 100.0).round()
-            as usize,
+    format!(
+        "chapter {current}/{chapters}  ·  {}% of book",
+        state.percent
     )
 }
 
@@ -353,12 +327,10 @@ fn load_preview(path: &Path, picker: &mut Picker) -> Result<Preview> {
         .ok()
         .flatten()
         .map(|cover| picker.new_resize_protocol(cover.thumbnail(1000, 1400)));
-    let book_percent = book_percent(path, state).unwrap_or(0);
     Ok(Preview {
         metadata,
         chapters,
         state,
-        book_percent,
         image,
     })
 }
@@ -487,7 +459,7 @@ fn draw_preview(frame: &mut Frame, area: Rect, preview: Option<&mut Preview>) {
             Line::from(Span::styled(author, Style::default().fg(FG))),
             Line::from(Span::styled(series, Style::default().fg(MUTED))),
             Line::from(Span::styled(
-                progress_label(preview.state, preview.chapters, preview.book_percent),
+                progress_label(preview.state, preview.chapters),
                 Style::default().fg(ACCENT),
             )),
         ])
@@ -554,7 +526,7 @@ fn draw_book_selector(
     let continue_label = if has_progress {
         format!(
             "↳ Continue\n    {}",
-            progress_label(preview.state, preview.chapters, preview.book_percent)
+            progress_label(preview.state, preview.chapters)
         )
     } else {
         "  Start reading".to_owned()

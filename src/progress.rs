@@ -46,6 +46,7 @@ pub struct ReadingState {
     pub focus: FocusLevel,
     pub font_size: i32,
     pub completed: bool,
+    pub percent: usize,
 }
 impl Default for ReadingState {
     fn default() -> Self {
@@ -54,6 +55,7 @@ impl Default for ReadingState {
             focus: FocusLevel::Medium,
             font_size: 20,
             completed: false,
+            percent: 0,
         }
     }
 }
@@ -75,18 +77,19 @@ impl Store {
     pub fn load(&self, path: &Path) -> Result<Option<ReadingState>> {
         let key = document_key(path)?;
         self.connection.query_row(
-            "SELECT chapter, block, segment, focus_level, font_size, completed FROM progress WHERE path=?1",
+            "SELECT chapter, block, segment, focus_level, font_size, completed, percent FROM progress WHERE path=?1",
             [key], |row| Ok(ReadingState {
                 position: Position { chapter: row.get::<_, i64>(0)?.max(0) as usize, block: row.get::<_, i64>(1)?.max(0) as usize, segment: row.get::<_, i64>(2)?.max(0) as usize },
                 focus: FocusLevel::parse(&row.get::<_, String>(3)?),
                 font_size: row.get::<_, i32>(4)?.clamp(14, 48),
                 completed: row.get(5)?,
+                percent: row.get::<_, i64>(6)?.clamp(0, 100) as usize,
             })
         ).optional().map_err(Into::into)
     }
     pub fn most_recent(&self, paths: &[PathBuf]) -> Result<Option<(PathBuf, ReadingState)>> {
         let mut statement = self.connection.prepare(
-            "SELECT chapter, block, segment, focus_level, font_size, completed, updated_at
+            "SELECT chapter, block, segment, focus_level, font_size, completed, percent, updated_at
              FROM progress WHERE path=?1",
         )?;
         let mut latest = None;
@@ -104,8 +107,9 @@ impl Store {
                             focus: FocusLevel::parse(&row.get::<_, String>(3)?),
                             font_size: row.get::<_, i32>(4)?.clamp(14, 48),
                             completed: row.get(5)?,
+                            percent: row.get::<_, i64>(6)?.clamp(0, 100) as usize,
                         },
-                        row.get(6)?,
+                        row.get(7)?,
                     ))
                 })
                 .optional()?;
@@ -127,9 +131,9 @@ impl Store {
             .unwrap_or_default()
             .as_millis() as i64;
         self.connection.execute(
-            "INSERT INTO progress(path,chapter,block,segment,focus_level,font_size,completed,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
-             ON CONFLICT(path) DO UPDATE SET chapter=excluded.chapter,block=excluded.block,segment=excluded.segment,focus_level=excluded.focus_level,font_size=excluded.font_size,completed=excluded.completed,updated_at=excluded.updated_at",
-            params![key, state.position.chapter as i64, state.position.block as i64, state.position.segment as i64, state.focus.as_str(), state.font_size, state.completed, timestamp]
+            "INSERT INTO progress(path,chapter,block,segment,focus_level,font_size,completed,percent,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
+             ON CONFLICT(path) DO UPDATE SET chapter=excluded.chapter,block=excluded.block,segment=excluded.segment,focus_level=excluded.focus_level,font_size=excluded.font_size,completed=excluded.completed,percent=excluded.percent,updated_at=excluded.updated_at",
+            params![key, state.position.chapter as i64, state.position.block as i64, state.position.segment as i64, state.focus.as_str(), state.font_size, state.completed, state.percent.min(100) as i64, timestamp]
         )?;
         Ok(())
     }
@@ -146,9 +150,19 @@ fn initialize(connection: &Connection) -> Result<()> {
             focus_level TEXT NOT NULL DEFAULT 'medium',
             font_size INTEGER NOT NULL DEFAULT 20,
             completed INTEGER NOT NULL DEFAULT 0 CHECK(completed IN (0,1)),
+            percent INTEGER NOT NULL DEFAULT 0 CHECK(percent BETWEEN 0 AND 100),
             updated_at INTEGER NOT NULL
         );",
     )?;
+    let columns = connection
+        .prepare("PRAGMA table_info(progress)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !columns.iter().any(|column| column == "percent") {
+        connection.execute_batch(
+            "ALTER TABLE progress ADD COLUMN percent INTEGER NOT NULL DEFAULT 0 CHECK(percent BETWEEN 0 AND 100);",
+        )?;
+    }
     Ok(())
 }
 fn database_path() -> Result<PathBuf> {
