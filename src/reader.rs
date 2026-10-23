@@ -2,7 +2,6 @@ use std::{
     cell::{Cell, RefCell},
     path::{Path, PathBuf},
     rc::Rc,
-    time::Duration,
 };
 
 use anyhow::Result;
@@ -75,7 +74,6 @@ fn build(
         &passages.borrow(),
         initial.position,
     )));
-    let animation_generation = Rc::new(Cell::new(0_u64));
 
     let list = ListBox::new();
     list.set_selection_mode(gtk::SelectionMode::None);
@@ -116,9 +114,6 @@ fn build(
         &list,
         &scroller,
         visible_index(&passages.borrow(), current.get()),
-        false,
-        Rc::clone(&animation_generation),
-        animation_generation.get(),
     );
 
     let keys = EventControllerKey::new();
@@ -129,7 +124,6 @@ fn build(
         let window = window.downgrade();
         let passages = Rc::clone(&passages);
         let current = Rc::clone(&current);
-        let animation_generation = Rc::clone(&animation_generation);
         let state = Rc::clone(&state);
         let chapters = chapters.clone();
         let outcome = Rc::clone(&outcome);
@@ -199,19 +193,8 @@ fn build(
                 rebuild = true;
             }
             current.set(next);
-            let generation = animation_generation.get().wrapping_add(1);
-            animation_generation.set(generation);
             if rebuild {
                 populate(&list, &passages.borrow(), next, state.borrow().font_size);
-            } else if next != previous {
-                animate_transition(
-                    &list,
-                    visible_index(&passages.borrow(), previous),
-                    visible_index(&passages.borrow(), next),
-                    state.borrow().font_size,
-                    Rc::clone(&animation_generation),
-                    generation,
-                );
             } else {
                 style_rows(
                     &list,
@@ -219,14 +202,7 @@ fn build(
                     state.borrow().font_size,
                 );
             }
-            center_current(
-                &list,
-                &scroller,
-                visible_index(&passages.borrow(), next),
-                !rebuild && next != previous,
-                Rc::clone(&animation_generation),
-                generation,
-            );
+            center_current(&list, &scroller, visible_index(&passages.borrow(), next));
             update_status(&status, &passages.borrow(), next, state.borrow().focus);
             save(&path, &passages.borrow(), next, &state.borrow());
             glib::Propagation::Stop
@@ -365,48 +341,7 @@ fn style_rows(list: &ListBox, active: usize, font_size: i32) {
         index += 1;
     }
 }
-fn animate_transition(
-    list: &ListBox,
-    previous: usize,
-    next: usize,
-    font_size: i32,
-    animation_generation: Rc<Cell<u64>>,
-    generation: u64,
-) {
-    style_rows(list, next, font_size);
-    let Some(outgoing) = list.row_at_index(previous as i32) else {
-        return;
-    };
-    let Some(incoming) = list.row_at_index(next as i32) else {
-        return;
-    };
-    outgoing.set_opacity(1.0);
-    incoming.set_opacity(0.18);
-    let started = std::time::Instant::now();
-    glib::timeout_add_local(Duration::from_millis(33), move || {
-        if animation_generation.get() != generation {
-            return glib::ControlFlow::Break;
-        }
-        let progress = (started.elapsed().as_secs_f64() / 0.24).clamp(0.0, 1.0);
-        let eased = progress * progress * (3.0 - 2.0 * progress);
-        outgoing.set_opacity(1.0 - eased * 0.82);
-        incoming.set_opacity(0.18 + eased * 0.82);
-        if progress >= 1.0 {
-            glib::ControlFlow::Break
-        } else {
-            glib::ControlFlow::Continue
-        }
-    });
-}
-
-fn center_current(
-    list: &ListBox,
-    scroller: &ScrolledWindow,
-    active: usize,
-    smooth: bool,
-    animation_generation: Rc<Cell<u64>>,
-    generation: u64,
-) {
+fn center_current(list: &ListBox, scroller: &ScrolledWindow, active: usize) {
     let Some(row) = list.row_at_index(active as i32) else {
         return;
     };
@@ -416,31 +351,7 @@ fn center_current(
         let centered = f64::from(allocation.y()) + f64::from(allocation.height()) / 2.0
             - adjustment.page_size() / 2.0;
         let maximum = (adjustment.upper() - adjustment.page_size()).max(adjustment.lower());
-        let target = centered.clamp(adjustment.lower(), maximum);
-        if !smooth {
-            adjustment.set_value(target);
-            return;
-        }
-        let start = adjustment.value();
-        let distance = target - start;
-        let started = std::time::Instant::now();
-        glib::timeout_add_local(Duration::from_millis(33), move || {
-            if animation_generation.get() != generation {
-                return glib::ControlFlow::Break;
-            }
-            let progress = (started.elapsed().as_secs_f64() / 0.22).clamp(0.0, 1.0);
-            let eased = if progress < 0.5 {
-                4.0 * progress * progress * progress
-            } else {
-                1.0 - (-2.0 * progress + 2.0).powi(3) / 2.0
-            };
-            adjustment.set_value(start + distance * eased);
-            if progress >= 1.0 {
-                glib::ControlFlow::Break
-            } else {
-                glib::ControlFlow::Continue
-            }
-        });
+        adjustment.set_value(centered.clamp(adjustment.lower(), maximum));
     });
 }
 fn update_status(label: &Label, passages: &[Passage], current: usize, focus: FocusLevel) {
