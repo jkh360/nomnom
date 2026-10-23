@@ -1,0 +1,12 @@
+/target/
+/result
+/.direnv/
+/.env
+/.env.*
+*.epub
+*.sqlite
+*.sqlite3
+*.db
+*.swp
+*.swo
+.DS_Store

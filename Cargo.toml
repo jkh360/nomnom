@@ -1,0 +1,27 @@
+[package]
+name = "nomnom"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+description = "A minimal, keyboard-driven EPUB reader for Linux"
+repository = "https://github.com/jkh360/nomnom"
+rust-version = "1.85"
+
+[dependencies]
+anyhow = "1.0"
+crossterm = "0.28"
+gtk = { package = "gtk4", version = "0.10", features = ["v4_10"] }
+html-escape = "0.2"
+image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+natord = "1.0"
+ratatui = "0.29"
+ratatui-image = { version = "4.2", default-features = false }
+roxmltree = "0.20"
+rusqlite = { version = "0.37", features = ["bundled"] }
+scraper = "0.22"
+zip = { version = "5.1", default-features = false, features = ["deflate", "bzip2", "zstd"] }
+
+[profile.release]
+lto = "thin"
+strip = true
+codegen-units = 1
