@@ -38,16 +38,15 @@ fn run() -> Result<()> {
     };
 
     while let Some(selected) = selection {
-        let mut book = epub::Epub::open(&selected.path)?;
+        let book = epub::Epub::open(&selected.path)?;
         let title = book.metadata().title.clone();
-        let chapters = book.chapters()?;
         let mut state = Store::open()?.load(&selected.path)?.unwrap_or_default();
         if selected.restart {
             state.position = Position::default();
             state.completed = false;
             state.percent = 0;
         }
-        match reader::open(&selected.path, &title, chapters, state)? {
+        match reader::open(&selected.path, &title, book, state)? {
             reader::Exit::Quit => return Ok(()),
             reader::Exit::Library => selection = library::select(Some(&selected))?,
         }

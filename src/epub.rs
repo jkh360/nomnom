@@ -201,25 +201,19 @@ impl Epub {
         ))
     }
 
-    pub fn chapters(&mut self) -> Result<Vec<Chapter>> {
-        let ids = self.spine.clone();
-        let mut chapters = Vec::with_capacity(ids.len());
-        for (index, id) in ids.iter().enumerate() {
-            let Some(item) = self.manifest.get(id) else {
-                continue;
-            };
-            let name = archive_path(&self.package_dir, &item.href);
-            let source = read_entry(&mut self.archive, &name)
-                .with_context(|| format!("failed to read chapter {name}"))?;
-            let chapter = parse_chapter(&source, index + 1);
-            if !chapter.blocks.is_empty() {
-                chapters.push(chapter);
-            }
-        }
-        if chapters.is_empty() {
-            bail!("EPUB spine contains no readable text");
-        }
-        Ok(chapters)
+    pub fn chapter(&mut self, index: usize) -> Result<Chapter> {
+        let id = self
+            .spine
+            .get(index)
+            .context("chapter index is out of range")?;
+        let item = self
+            .manifest
+            .get(id)
+            .with_context(|| format!("EPUB spine item is missing from the manifest: {id}"))?;
+        let name = archive_path(&self.package_dir, &item.href);
+        let source = read_entry(&mut self.archive, &name)
+            .with_context(|| format!("failed to read chapter {name}"))?;
+        Ok(parse_chapter(&source, index + 1))
     }
 }
 

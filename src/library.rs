@@ -2,11 +2,14 @@ use std::{
     env, fmt, fs,
     io::{self, IsTerminal},
     path::{Path, PathBuf},
-    time::Duration,
+    sync::mpsc,
+    thread,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use image::DynamicImage;
 use ratatui::{
     DefaultTerminal, Frame,
     layout::{Constraint, Direction, Layout, Rect},
@@ -91,6 +94,14 @@ struct Preview {
     image: Option<StatefulProtocol>,
 }
 
+struct PreviewData {
+    path: PathBuf,
+    metadata: Metadata,
+    chapters: usize,
+    state: ReadingState,
+    cover: Option<DynamicImage>,
+}
+
 pub fn select(previous: Option<&Selection>) -> Result<Option<Selection>> {
     ensure_terminal()?;
     let configured = default_directory().filter(|p| p.is_dir());
@@ -107,22 +118,44 @@ pub fn select(previous: Option<&Selection>) -> Result<Option<Selection>> {
         picker.set_protocol_type(ProtocolType::Kitty);
     }
     let mut terminal = ratatui::init();
+    let (preview_sender, preview_results) = mpsc::channel::<PreviewData>();
     let result = (|| {
         let mut notice = None;
         let mut preview_path = None;
+        let mut preview_loading = None;
+        let mut preview_requested_at = Instant::now();
         let mut preview = None;
+        let mut entries = scan_entries(&directory)?;
         loop {
-            let entries = entries(&directory)?;
             selected = selected.min(entries.len().saturating_sub(1));
             let target = entries
                 .get(selected)
                 .and_then(Entry::book)
                 .map(Path::to_owned);
+            while let Ok(data) = preview_results.try_recv() {
+                if preview_path.as_deref() == Some(data.path.as_path()) {
+                    preview = Some(make_preview(data, &mut picker));
+                    preview_loading = None;
+                }
+            }
             if target != preview_path {
-                preview = target
-                    .as_deref()
-                    .and_then(|path| load_preview(path, &mut picker).ok());
-                preview_path = target;
+                preview = None;
+                preview_loading = None;
+                preview_requested_at = Instant::now();
+                preview_path = target.clone();
+            }
+            if preview.is_none()
+                && preview_loading != target
+                && preview_requested_at.elapsed() >= Duration::from_millis(120)
+                && let Some(path) = target
+            {
+                preview_loading = Some(path.clone());
+                let sender = preview_sender.clone();
+                thread::spawn(move || {
+                    if let Ok(data) = load_preview_data(&path) {
+                        let _ = sender.send(data);
+                    }
+                });
             }
             terminal.draw(|frame| {
                 draw_library(
@@ -134,6 +167,9 @@ pub fn select(previous: Option<&Selection>) -> Result<Option<Selection>> {
                     preview.as_mut(),
                 )
             })?;
+            if !event::poll(Duration::from_millis(40))? {
+                continue;
+            }
             let Event::Key(key) = event::read()? else {
                 continue;
             };
@@ -154,6 +190,8 @@ pub fn select(previous: Option<&Selection>) -> Result<Option<Selection>> {
                     if let Some(parent) = directory.parent() {
                         directory = parent.to_owned();
                         selected = 0;
+                        entries = scan_entries(&directory)?;
+                        preview_path = None;
                     }
                 }
                 KeyCode::Char('l') | KeyCode::Right | KeyCode::Enter => {
@@ -162,6 +200,8 @@ pub fn select(previous: Option<&Selection>) -> Result<Option<Selection>> {
                             Entry::Directory(path) => {
                                 directory = path.clone();
                                 selected = 0;
+                                entries = scan_entries(&directory)?;
+                                preview_path = None;
                             }
                             Entry::LastRead { path, .. } | Entry::Book { path, .. } => {
                                 let selection = details(
@@ -176,6 +216,7 @@ pub fn select(previous: Option<&Selection>) -> Result<Option<Selection>> {
                                 if selection.is_some() {
                                     return Ok(selection);
                                 }
+                                entries = scan_entries(&directory)?;
                                 preview_path = None;
                             }
                         }
@@ -216,7 +257,7 @@ fn details(
     path: PathBuf,
     location: Location,
 ) -> Result<Option<Selection>> {
-    let mut preview = load_preview(&path, picker)?;
+    let mut preview = make_preview(load_preview_data(&path)?, picker);
     let has_progress = preview.state.position.chapter != 0
         || preview.state.position.block != 0
         || preview.state.position.segment != 0;
@@ -259,7 +300,7 @@ fn details(
     }
 }
 
-fn entries(directory: &Path) -> Result<Vec<Entry>> {
+fn scan_entries(directory: &Path) -> Result<Vec<Entry>> {
     let mut directories = Vec::new();
     let mut books = Vec::new();
     for item in fs::read_dir(directory)
@@ -317,22 +358,28 @@ fn progress_label(state: ReadingState, chapters: usize) -> String {
     )
 }
 
-fn load_preview(path: &Path, picker: &mut Picker) -> Result<Preview> {
+fn load_preview_data(path: &Path) -> Result<PreviewData> {
     let mut book = Epub::open(path)?;
-    let metadata = book.metadata().clone();
-    let chapters = book.chapter_count();
-    let state = Store::open()?.load(path)?.unwrap_or_default();
-    let image = book
-        .cover()
-        .ok()
-        .flatten()
-        .map(|cover| picker.new_resize_protocol(cover.thumbnail(1000, 1400)));
-    Ok(Preview {
-        metadata,
-        chapters,
-        state,
-        image,
+    Ok(PreviewData {
+        path: path.to_owned(),
+        metadata: book.metadata().clone(),
+        chapters: book.chapter_count(),
+        state: Store::open()?.load(path)?.unwrap_or_default(),
+        cover: book
+            .cover()
+            .ok()
+            .flatten()
+            .map(|cover| cover.thumbnail(1000, 1400)),
     })
+}
+
+fn make_preview(data: PreviewData, picker: &mut Picker) -> Preview {
+    Preview {
+        metadata: data.metadata,
+        chapters: data.chapters,
+        state: data.state,
+        image: data.cover.map(|cover| picker.new_resize_protocol(cover)),
+    }
 }
 
 fn draw_library(

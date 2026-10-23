@@ -1,17 +1,19 @@
 use std::{
     cell::{Cell, RefCell},
     path::{Path, PathBuf},
+    process::Command,
     rc::Rc,
+    time::Duration,
 };
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use gtk::{
     Application, ApplicationWindow, EventControllerKey, Label, ListBox, ListBoxRow, Orientation,
     PolicyType, ScrolledWindow, gdk, glib, prelude::*,
 };
 
 use crate::{
-    epub::{BlockKind, Chapter},
+    epub::{BlockKind, Chapter, Epub},
     progress::{FocusLevel, Position, ReadingState, Store},
 };
 
@@ -22,6 +24,12 @@ pub enum Exit {
 }
 
 #[derive(Clone)]
+struct LoadedBook {
+    document: Rc<RefCell<Epub>>,
+    chapter: Chapter,
+    chapter_count: usize,
+}
+
 struct Passage {
     chapter: usize,
     chapter_title: String,
@@ -34,9 +42,30 @@ struct Passage {
 pub fn open(
     path: &Path,
     title: &str,
-    chapters: Vec<Chapter>,
-    initial: ReadingState,
+    mut document: Epub,
+    mut initial: ReadingState,
 ) -> Result<Exit> {
+    let chapter_count = document.chapter_count();
+    let requested_chapter = initial
+        .position
+        .chapter
+        .min(chapter_count.saturating_sub(1));
+    let Some((initial_chapter, chapter, _)) = load_readable_chapter(
+        &mut document,
+        requested_chapter,
+        true,
+        chapter_count,
+        initial.focus,
+    )?
+    else {
+        bail!("EPUB contains no readable text");
+    };
+    initial.position.chapter = initial_chapter;
+    let book = LoadedBook {
+        document: Rc::new(RefCell::new(document)),
+        chapter,
+        chapter_count,
+    };
     let outcome = Rc::new(Cell::new(Exit::Quit));
     let requested = Rc::clone(&outcome);
     let path = path.to_owned();
@@ -50,7 +79,11 @@ pub fn open(
             app,
             path.clone(),
             title.clone(),
-            chapters.clone(),
+            LoadedBook {
+                document: Rc::clone(&book.document),
+                chapter: book.chapter.clone(),
+                chapter_count: book.chapter_count,
+            },
             initial,
             Rc::clone(&requested),
         )
@@ -63,17 +96,28 @@ fn build(
     app: &Application,
     path: PathBuf,
     title: String,
-    chapters: Vec<Chapter>,
+    book: LoadedBook,
     initial: ReadingState,
     outcome: Rc<Cell<Exit>>,
 ) {
     install_css();
+    let LoadedBook {
+        document,
+        chapter,
+        chapter_count,
+    } = book;
     let state = Rc::new(RefCell::new(initial));
-    let passages = Rc::new(RefCell::new(make_passages(&chapters, initial.focus)));
+    let current_chapter = Rc::new(RefCell::new(chapter));
+    let passages = Rc::new(RefCell::new(make_passages(
+        &current_chapter.borrow(),
+        initial.position.chapter,
+        initial.focus,
+    )));
     let current = Rc::new(Cell::new(find_passage(
         &passages.borrow(),
         initial.position,
     )));
+    let transition_generation = Rc::new(Cell::new(0_u64));
 
     let list = ListBox::new();
     list.set_selection_mode(gtk::SelectionMode::None);
@@ -124,18 +168,32 @@ fn build(
         let window = window.downgrade();
         let passages = Rc::clone(&passages);
         let current = Rc::clone(&current);
+        let transition_generation = Rc::clone(&transition_generation);
         let state = Rc::clone(&state);
-        let chapters = chapters.clone();
+        let document = Rc::clone(&document);
+        let current_chapter = Rc::clone(&current_chapter);
         let outcome = Rc::clone(&outcome);
         let path = path.clone();
         keys.connect_key_pressed(move |_, key, _, _| {
             let mut rebuild = false;
             let previous = current.get();
             let mut next = previous;
+            let active_chapter = passages
+                .borrow()
+                .first()
+                .map_or(0, |passage| passage.chapter);
+            let mut target_chapter = None;
+            let mut open_at_end = false;
             match key {
                 gdk::Key::q => {
                     outcome.set(Exit::Quit);
-                    save(&path, &passages.borrow(), current.get(), &state.borrow());
+                    save(
+                        &path,
+                        &passages.borrow(),
+                        current.get(),
+                        chapter_count,
+                        &state.borrow(),
+                    );
                     if let Some(w) = window.upgrade() {
                         w.close();
                     }
@@ -143,21 +201,42 @@ fn build(
                 }
                 gdk::Key::Escape => {
                     outcome.set(Exit::Library);
-                    save(&path, &passages.borrow(), current.get(), &state.borrow());
+                    save(
+                        &path,
+                        &passages.borrow(),
+                        current.get(),
+                        chapter_count,
+                        &state.borrow(),
+                    );
                     if let Some(w) = window.upgrade() {
                         w.close();
                     }
                     return glib::Propagation::Stop;
                 }
                 gdk::Key::j | gdk::Key::Down => {
-                    next = (next + 1).min(passages.borrow().len().saturating_sub(1))
+                    if next + 1 < passages.borrow().len() {
+                        next += 1;
+                    } else if active_chapter + 1 < chapter_count {
+                        target_chapter = Some(active_chapter + 1);
+                    }
                 }
-                gdk::Key::k | gdk::Key::Up => next = next.saturating_sub(1),
+                gdk::Key::k | gdk::Key::Up => {
+                    if next > 0 {
+                        next -= 1;
+                    } else if active_chapter > 0 {
+                        target_chapter = Some(active_chapter - 1);
+                        open_at_end = true;
+                    }
+                }
                 gdk::Key::l | gdk::Key::Right => {
-                    next = chapter_jump(&passages.borrow(), next, true)
+                    if active_chapter + 1 < chapter_count {
+                        target_chapter = Some(active_chapter + 1);
+                    }
                 }
                 gdk::Key::h | gdk::Key::Left => {
-                    next = chapter_jump(&passages.borrow(), next, false)
+                    if active_chapter > 0 {
+                        target_chapter = Some(active_chapter - 1);
+                    }
                 }
                 gdk::Key::_1 | gdk::Key::_2 | gdk::Key::_3 | gdk::Key::_4 => {
                     let focus = match key {
@@ -168,7 +247,8 @@ fn build(
                     };
                     let position = passage_position(&passages.borrow(), next);
                     state.borrow_mut().focus = focus;
-                    *passages.borrow_mut() = make_passages(&chapters, focus);
+                    *passages.borrow_mut() =
+                        make_passages(&current_chapter.borrow(), active_chapter, focus);
                     next = find_passage(&passages.borrow(), position);
                     rebuild = true;
                 }
@@ -182,19 +262,55 @@ fn build(
                     state.borrow_mut().font_size = (size - 2).max(14);
                     rebuild = true;
                 }
+                gdk::Key::d => {
+                    if let Some(parent) = window.upgrade() {
+                        show_dictionary(
+                            &list,
+                            visible_index(&passages.borrow(), current.get()),
+                            &parent,
+                        );
+                    }
+                    return glib::Propagation::Stop;
+                }
                 _ => return glib::Propagation::Proceed,
             }
-            if passages
-                .borrow()
-                .get(previous)
-                .zip(passages.borrow().get(next))
-                .is_some_and(|(from, to)| from.chapter != to.chapter)
-            {
-                rebuild = true;
+            if let Some(target) = target_chapter {
+                match load_readable_chapter(
+                    &mut document.borrow_mut(),
+                    target,
+                    target >= active_chapter,
+                    chapter_count,
+                    state.borrow().focus,
+                ) {
+                    Ok(Some((chapter_index, chapter, loaded_passages))) => {
+                        *current_chapter.borrow_mut() = chapter;
+                        *passages.borrow_mut() = loaded_passages;
+                        next = if open_at_end {
+                            passages.borrow().len().saturating_sub(1)
+                        } else {
+                            0
+                        };
+                        rebuild = true;
+                        state.borrow_mut().position.chapter = chapter_index;
+                    }
+                    Ok(None) => {}
+                    Err(error) => eprintln!("nomnom: failed to load chapter: {error:#}"),
+                }
             }
             current.set(next);
+            let generation = transition_generation.get().wrapping_add(1);
+            transition_generation.set(generation);
             if rebuild {
                 populate(&list, &passages.borrow(), next, state.borrow().font_size);
+            } else if next != previous {
+                fade_passages(
+                    &list,
+                    visible_index(&passages.borrow(), previous),
+                    visible_index(&passages.borrow(), next),
+                    state.borrow().font_size,
+                    Rc::clone(&transition_generation),
+                    generation,
+                );
             } else {
                 style_rows(
                     &list,
@@ -204,7 +320,13 @@ fn build(
             }
             center_current(&list, &scroller, visible_index(&passages.borrow(), next));
             update_status(&status, &passages.borrow(), next, state.borrow().focus);
-            save(&path, &passages.borrow(), next, &state.borrow());
+            save(
+                &path,
+                &passages.borrow(),
+                next,
+                chapter_count,
+                &state.borrow(),
+            );
             glib::Propagation::Stop
         });
     }
@@ -212,33 +334,31 @@ fn build(
     window.present();
 }
 
-fn make_passages(chapters: &[Chapter], level: FocusLevel) -> Vec<Passage> {
+fn make_passages(chapter: &Chapter, chapter_index: usize, level: FocusLevel) -> Vec<Passage> {
     let mut passages = Vec::new();
-    for (chapter_index, chapter) in chapters.iter().enumerate() {
-        for (block_index, block) in chapter.blocks.iter().enumerate() {
-            let pieces = if block.kind == BlockKind::Heading || level == FocusLevel::Paragraph {
-                vec![block.text.clone()]
-            } else {
-                group_sentences(
-                    &sentences(&block.text),
-                    match level {
-                        FocusLevel::Sentence => 1,
-                        FocusLevel::Short => 2,
-                        FocusLevel::Medium => 4,
-                        FocusLevel::Paragraph => usize::MAX,
-                    },
-                )
-            };
-            for (segment, text) in pieces.into_iter().enumerate() {
-                passages.push(Passage {
-                    chapter: chapter_index,
-                    chapter_title: chapter.title.clone(),
-                    block: block_index,
-                    segment,
-                    text,
-                    kind: block.kind,
-                });
-            }
+    for (block_index, block) in chapter.blocks.iter().enumerate() {
+        let pieces = if block.kind == BlockKind::Heading || level == FocusLevel::Paragraph {
+            vec![block.text.clone()]
+        } else {
+            group_sentences(
+                &sentences(&block.text),
+                match level {
+                    FocusLevel::Sentence => 1,
+                    FocusLevel::Short => 2,
+                    FocusLevel::Medium => 4,
+                    FocusLevel::Paragraph => usize::MAX,
+                },
+            )
+        };
+        for (segment, text) in pieces.into_iter().enumerate() {
+            passages.push(Passage {
+                chapter: chapter_index,
+                chapter_title: chapter.title.clone(),
+                block: block_index,
+                segment,
+                text,
+                kind: block.kind,
+            });
         }
     }
     passages
@@ -281,6 +401,7 @@ fn populate(list: &ListBox, passages: &[Passage], active: usize, font_size: i32)
     for passage in passages.iter().filter(|passage| passage.chapter == chapter) {
         let label = Label::new(Some(&passage.text));
         label.set_wrap(true);
+        label.set_selectable(true);
         label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
         label.set_xalign(0.0);
         label.set_max_width_chars(64);
@@ -341,6 +462,101 @@ fn style_rows(list: &ListBox, active: usize, font_size: i32) {
         index += 1;
     }
 }
+fn fade_passages(
+    list: &ListBox,
+    previous: usize,
+    next: usize,
+    font_size: i32,
+    transition_generation: Rc<Cell<u64>>,
+    generation: u64,
+) {
+    style_rows(list, next, font_size);
+    let Some(outgoing) = list.row_at_index(previous as i32) else {
+        return;
+    };
+    let Some(incoming) = list.row_at_index(next as i32) else {
+        return;
+    };
+    outgoing.set_opacity(1.0);
+    incoming.set_opacity(0.18);
+    let started = std::time::Instant::now();
+    glib::timeout_add_local(Duration::from_millis(33), move || {
+        if transition_generation.get() != generation {
+            return glib::ControlFlow::Break;
+        }
+        let progress = (started.elapsed().as_secs_f64() / 0.18).clamp(0.0, 1.0);
+        let eased = progress * progress * (3.0 - 2.0 * progress);
+        outgoing.set_opacity(1.0 - eased * 0.82);
+        incoming.set_opacity(0.18 + eased * 0.82);
+        if progress >= 1.0 {
+            glib::ControlFlow::Break
+        } else {
+            glib::ControlFlow::Continue
+        }
+    });
+}
+
+fn show_dictionary(list: &ListBox, active: usize, parent: &ApplicationWindow) {
+    let Some(label) = list
+        .row_at_index(active as i32)
+        .and_then(|row| row.child())
+        .and_then(|child| child.downcast::<Label>().ok())
+    else {
+        return;
+    };
+    let Some((start, end)) = label.selection_bounds() else {
+        return;
+    };
+    let selected = label
+        .text()
+        .chars()
+        .skip(start.max(0) as usize)
+        .take(end.saturating_sub(start) as usize)
+        .collect::<String>();
+    let word = selected
+        .trim()
+        .trim_matches(|character: char| !character.is_alphanumeric());
+    if word.is_empty() {
+        return;
+    }
+    let definition = dictionary_definition(word).unwrap_or_else(|| {
+        "No local dictionary provider was found. Install dict, sdcv, or WordNet to enable definitions."
+            .to_owned()
+    });
+    let content = Label::new(Some(&definition));
+    content.set_wrap(true);
+    content.set_selectable(true);
+    content.set_xalign(0.0);
+    content.set_margin_start(24);
+    content.set_margin_end(24);
+    content.set_margin_top(20);
+    content.set_margin_bottom(20);
+    let popup = gtk::Window::builder()
+        .title(word)
+        .transient_for(parent)
+        .modal(true)
+        .default_width(520)
+        .default_height(260)
+        .child(&content)
+        .build();
+    popup.present();
+}
+
+fn dictionary_definition(word: &str) -> Option<String> {
+    let providers: [(&str, &[&str]); 3] = [
+        ("dict", &[word]),
+        ("sdcv", &["--non-interactive", word]),
+        ("wn", &[word, "-over"]),
+    ];
+    providers.into_iter().find_map(|(program, arguments)| {
+        let output = Command::new(program).args(arguments).output().ok()?;
+        output.status.success().then(|| {
+            let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            if text.is_empty() { None } else { Some(text) }
+        })?
+    })
+}
+
 fn center_current(list: &ListBox, scroller: &ScrolledWindow, active: usize) {
     let Some(row) = list.row_at_index(active as i32) else {
         return;
@@ -395,36 +611,53 @@ fn find_passage(passages: &[Passage], position: Position) -> usize {
         })
         .unwrap_or(0)
 }
-fn chapter_jump(passages: &[Passage], current: usize, forward: bool) -> usize {
-    let Some(here) = passages.get(current) else {
-        return 0;
-    };
-    if forward {
-        passages
-            .iter()
-            .position(|p| p.chapter > here.chapter)
-            .unwrap_or(current)
-    } else {
-        passages
-            .iter()
-            .rposition(|p| p.chapter < here.chapter)
-            .map(|i| {
-                passages[..=i]
-                    .iter()
-                    .position(|p| p.chapter == passages[i].chapter)
-                    .unwrap_or(i)
-            })
-            .unwrap_or(current)
+fn load_readable_chapter(
+    document: &mut Epub,
+    start: usize,
+    forward: bool,
+    chapter_count: usize,
+    focus: FocusLevel,
+) -> Result<Option<(usize, Chapter, Vec<Passage>)>> {
+    let mut index = start;
+    loop {
+        let chapter = document.chapter(index)?;
+        let passages = make_passages(&chapter, index, focus);
+        if !passages.is_empty() {
+            return Ok(Some((index, chapter, passages)));
+        }
+        if forward {
+            if index + 1 >= chapter_count {
+                return Ok(None);
+            }
+            index += 1;
+        } else {
+            if index == 0 {
+                return Ok(None);
+            }
+            index -= 1;
+        }
     }
 }
-fn save(path: &Path, passages: &[Passage], current: usize, state: &ReadingState) {
+fn save(
+    path: &Path,
+    passages: &[Passage],
+    current: usize,
+    chapter_count: usize,
+    state: &ReadingState,
+) {
     let mut saved = *state;
     saved.position = passage_position(passages, current);
-    saved.completed = current + 1 == passages.len();
-    saved.percent = if passages.is_empty() {
+    saved.completed = saved.position.chapter + 1 == chapter_count && current + 1 == passages.len();
+    let chapter_fraction = if passages.is_empty() {
+        0.0
+    } else {
+        (current + 1) as f64 / passages.len() as f64
+    };
+    saved.percent = if chapter_count == 0 {
         0
     } else {
-        (((current + 1) as f64 / passages.len() as f64) * 100.0).round() as usize
+        (((saved.position.chapter as f64 + chapter_fraction) / chapter_count as f64) * 100.0)
+            .round() as usize
     };
     if let Ok(store) = Store::open() {
         if let Err(error) = store.save(path, saved) {
