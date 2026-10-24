@@ -30,3 +30,5 @@ SQLite state is stored below the XDG state directory. Configuration is stored be
 Press `s` to speak the selected text, or the active passage when there is no selection. Press `x` to stop. Navigating also stops playback so speech never drifts away from the visible passage.
 
 Kokoro runs locally through the Python package in the Nix development shell. The default configuration uses American English (`a`), the `af_heart` voice, 24 kHz output, and normal speed. It can be adjusted with `NOMNOM_TTS_LANGUAGE`, `NOMNOM_TTS_VOICE`, `NOMNOM_TTS_SPEED`, and `NOMNOM_TTS_PYTHON`. The model is fetched by Kokoro on first use and is not stored in this repository.
+
+Dictionary lookup uses the local WordNet database included in the Nix environment, with `dict` and `sdcv` still supported when installed.

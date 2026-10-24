@@ -20,6 +20,7 @@
               pipewire
               rustc
               rustfmt
+              wordnet
               (python3.withPackages (python: with python; [
                 kokoro
                 numpy
