@@ -514,12 +514,7 @@ fn fade_passages(
     });
 }
 
-fn selected_text(list: &ListBox, active: usize) -> Option<String> {
-    let label = list
-        .row_at_index(active as i32)?
-        .child()?
-        .downcast::<Label>()
-        .ok()?;
+fn label_selection(label: &Label) -> Option<String> {
     let (start, end) = label.selection_bounds()?;
     let selected = label
         .text()
@@ -530,20 +525,35 @@ fn selected_text(list: &ListBox, active: usize) -> Option<String> {
     (!selected.trim().is_empty()).then_some(selected)
 }
 
+fn selected_text(list: &ListBox, active: usize) -> Option<String> {
+    let label = list
+        .row_at_index(active as i32)?
+        .child()?
+        .downcast::<Label>()
+        .ok()?;
+    label_selection(&label)
+}
+
+fn selected_word(text: &str) -> Option<&str> {
+    let word = text
+        .trim()
+        .trim_matches(|character: char| !character.is_alphanumeric());
+    (!word.is_empty()).then_some(word)
+}
+
 fn show_dictionary(list: &ListBox, active: usize, parent: &ApplicationWindow) {
     let Some(selected) = selected_text(list, active) else {
         return;
     };
-    let word = selected
-        .trim()
-        .trim_matches(|character: char| !character.is_alphanumeric());
-    if word.is_empty() {
+    let Some(word) = selected_word(&selected) else {
         return;
-    }
-    let definition = dictionary_definition(word).unwrap_or_else(|| {
-        "No local dictionary provider was found. Install dict, sdcv, or WordNet to enable definitions."
-            .to_owned()
-    });
+    };
+    show_definition(word, parent.upcast_ref());
+}
+
+fn show_definition(word: &str, parent: &gtk::Window) {
+    let definition = dictionary_definition(word)
+        .unwrap_or_else(|| format!("No definition was found for “{word}”."));
     let content = Label::new(Some(&definition));
     content.set_wrap(true);
     content.set_selectable(true);
@@ -569,13 +579,23 @@ fn show_dictionary(list: &ListBox, active: usize, parent: &ApplicationWindow) {
     let keys = EventControllerKey::new();
     let weak_popup = popup.downgrade();
     keys.connect_key_pressed(move |_, key, _, _| {
-        if matches!(key, gdk::Key::q | gdk::Key::Escape) {
-            if let Some(popup) = weak_popup.upgrade() {
+        let Some(popup) = weak_popup.upgrade() else {
+            return glib::Propagation::Proceed;
+        };
+        match key {
+            gdk::Key::q | gdk::Key::Escape => {
                 popup.close();
+                glib::Propagation::Stop
             }
-            glib::Propagation::Stop
-        } else {
-            glib::Propagation::Proceed
+            gdk::Key::d => {
+                if let Some(selected) = label_selection(&content)
+                    && let Some(word) = selected_word(&selected)
+                {
+                    show_definition(word, &popup);
+                }
+                glib::Propagation::Stop
+            }
+            _ => glib::Propagation::Proceed,
         }
     });
     popup.add_controller(keys);
