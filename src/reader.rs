@@ -552,14 +552,32 @@ fn show_dictionary(list: &ListBox, active: usize, parent: &ApplicationWindow) {
     content.set_margin_end(24);
     content.set_margin_top(20);
     content.set_margin_bottom(20);
+    let scroller = ScrolledWindow::builder()
+        .hscrollbar_policy(PolicyType::Never)
+        .vexpand(true)
+        .child(&content)
+        .build();
     let popup = gtk::Window::builder()
         .title(word)
         .transient_for(parent)
         .modal(true)
-        .default_width(520)
-        .default_height(260)
-        .child(&content)
+        .default_width(560)
+        .default_height(360)
+        .child(&scroller)
         .build();
+    let keys = EventControllerKey::new();
+    let weak_popup = popup.downgrade();
+    keys.connect_key_pressed(move |_, key, _, _| {
+        if matches!(key, gdk::Key::q | gdk::Key::Escape) {
+            if let Some(popup) = weak_popup.upgrade() {
+                popup.close();
+            }
+            glib::Propagation::Stop
+        } else {
+            glib::Propagation::Proceed
+        }
+    });
+    popup.add_controller(keys);
     popup.present();
 }
 
@@ -571,10 +589,8 @@ fn dictionary_definition(word: &str) -> Option<String> {
     ];
     providers.into_iter().find_map(|(program, arguments)| {
         let output = Command::new(program).args(arguments).output().ok()?;
-        output.status.success().then(|| {
-            let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-            if text.is_empty() { None } else { Some(text) }
-        })?
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if text.is_empty() { None } else { Some(text) }
     })
 }
 
