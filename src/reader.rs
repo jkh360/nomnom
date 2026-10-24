@@ -547,6 +547,7 @@ fn show_dictionary(list: &ListBox, active: usize, parent: &ApplicationWindow) {
     let content = Label::new(Some(&definition));
     content.set_wrap(true);
     content.set_selectable(true);
+    content.add_css_class("dictionary-definition");
     content.set_xalign(0.0);
     content.set_margin_start(24);
     content.set_margin_end(24);
@@ -590,8 +591,29 @@ fn dictionary_definition(word: &str) -> Option<String> {
     providers.into_iter().find_map(|(program, arguments)| {
         let output = Command::new(program).args(arguments).output().ok()?;
         let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        if text.is_empty() { None } else { Some(text) }
+        if text.is_empty() {
+            None
+        } else if program == "wn" {
+            Some(clean_wordnet_output(&text))
+        } else {
+            Some(text)
+        }
     })
+}
+
+fn clean_wordnet_output(text: &str) -> String {
+    text.lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !trimmed.starts_with("Overview of ")
+                && !(trimmed.starts_with("The ")
+                    && trimmed.contains(" has ")
+                    && trimmed.contains(" sense"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_owned()
 }
 
 fn center_current(list: &ListBox, scroller: &ScrolledWindow, active: usize) {
@@ -704,7 +726,7 @@ fn save(
 }
 fn install_css() {
     let css = gtk::CssProvider::new();
-    css.load_from_data("window { background: #1d2021; color: #ebdbb2; } .passages { background: #1d2021; } row, row:focus, row:focus-visible, row:selected, .passage:focus, .passage:focus-visible { outline: none; border: none; box-shadow: none; background: transparent; } .passage { color: #ebdbb2; line-height: 1.45; } .heading { font-weight: 700; } .quote { border-left: 3px solid #928374; padding-left: 20px; } .status { color: #a89984; font-size: 13px; }");
+    css.load_from_data("window { background: #1d2021; color: #ebdbb2; } .passages { background: #1d2021; } row, row:focus, row:focus-visible, row:selected, .passage:focus, .passage:focus-visible { outline: none; border: none; box-shadow: none; background: transparent; } .passage { color: #ebdbb2; line-height: 1.45; } .heading { font-weight: 700; } .quote { border-left: 3px solid #928374; padding-left: 20px; } .dictionary-definition { font-size: 18px; line-height: 1.45; } .status { color: #a89984; font-size: 13px; }");
     if let Some(display) = gdk::Display::default() {
         gtk::style_context_add_provider_for_display(
             &display,
@@ -716,7 +738,18 @@ fn install_css() {
 
 #[cfg(test)]
 mod tests {
-    use super::{group_sentences, sentences};
+    use super::{clean_wordnet_output, group_sentences, sentences};
+
+    #[test]
+    fn removes_wordnet_overview_headers() {
+        let output = clean_wordnet_output(
+            "Overview of noun antipathy\n\nThe noun antipathy has 2 senses (first 1 from tagged texts)\n\n1. antipathy -- (a feeling of intense dislike)\n2. antipathy -- (the object of a feeling of intense aversion)",
+        );
+        assert!(output.starts_with("1. antipathy"));
+        assert!(!output.contains("Overview"));
+        assert!(!output.contains("has 2 senses"));
+    }
+
     #[test]
     fn groups_without_crossing_a_paragraph() {
         let values = sentences("One. Two! Three?");
