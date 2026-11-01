@@ -45,7 +45,7 @@ fn run() -> Result<()> {
         if selected.restart {
             state.position = Position::default();
             state.completed = false;
-            state.percent = 0;
+            state.percent = 0.0;
         }
         match reader::open(&selected.path, &title, book, state)? {
             reader::Exit::Quit => return Ok(()),

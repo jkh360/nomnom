@@ -161,6 +161,19 @@ fn build(
         &scroller,
         visible_index(&passages.borrow(), current.get()),
     );
+    {
+        let list = list.clone();
+        let scroller = scroller.clone();
+        let passages = Rc::clone(&passages);
+        let current = Rc::clone(&current);
+        scroller.vadjustment().connect_changed(move |_| {
+            center_current(
+                &list,
+                &scroller,
+                visible_index(&passages.borrow(), current.get()),
+            );
+        });
+    }
 
     let keys = EventControllerKey::new();
     {
@@ -219,6 +232,11 @@ fn build(
                     return glib::Propagation::Stop;
                 }
                 gdk::Key::j | gdk::Key::Down => {
+                    let visible = visible_index(&passages.borrow(), current.get());
+                    if !is_current_centered(&list, &scroller, visible) {
+                        center_current(&list, &scroller, visible);
+                        return glib::Propagation::Stop;
+                    }
                     if next + 1 < passages.borrow().len() {
                         next += 1;
                     } else if active_chapter + 1 < chapter_count {
@@ -226,6 +244,11 @@ fn build(
                     }
                 }
                 gdk::Key::k | gdk::Key::Up => {
+                    let visible = visible_index(&passages.borrow(), current.get());
+                    if !is_current_centered(&list, &scroller, visible) {
+                        center_current(&list, &scroller, visible);
+                        return glib::Propagation::Stop;
+                    }
                     if next > 0 {
                         next -= 1;
                     } else if active_chapter > 0 {
@@ -557,6 +580,7 @@ fn show_definition(word: &str, parent: &gtk::Window) {
     let content = Label::new(Some(&definition));
     content.set_wrap(true);
     content.set_selectable(true);
+    content.set_focus_on_click(false);
     content.add_css_class("dictionary-definition");
     content.set_xalign(0.0);
     content.set_margin_start(24);
@@ -623,30 +647,67 @@ fn dictionary_definition(word: &str) -> Option<String> {
 
 fn clean_wordnet_output(text: &str) -> String {
     text.lines()
-        .filter(|line| {
+        .filter_map(|line| {
             let trimmed = line.trim();
-            !trimmed.starts_with("Overview of ")
-                && !(trimmed.starts_with("The ")
+            if trimmed.is_empty()
+                || trimmed.starts_with("Overview of ")
+                || (trimmed.starts_with("The ")
                     && trimmed.contains(" has ")
                     && trimmed.contains(" sense"))
+            {
+                None
+            } else {
+                Some(format_wordnet_sense(trimmed))
+            }
         })
         .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_owned()
+        .join("\n\n")
+}
+
+fn format_wordnet_sense(line: &str) -> String {
+    let Some((heading, body)) = line.split_once(" -- (") else {
+        return line.to_owned();
+    };
+    let number = heading
+        .split_once('.')
+        .map_or(heading, |(number, _)| number);
+    let body = body.strip_suffix(')').unwrap_or(body);
+    let mut parts = body.split("; \"");
+    let definition = parts.next().unwrap_or(body).trim();
+    let mut formatted = format!("{number}. {definition}");
+    for example in parts {
+        let example = example.trim().trim_matches('"');
+        if !example.is_empty() {
+            formatted.push_str("\n   Example: “");
+            formatted.push_str(example);
+            formatted.push('”');
+        }
+    }
+    formatted
+}
+
+fn centered_value(list: &ListBox, scroller: &ScrolledWindow, active: usize) -> Option<f64> {
+    let row = list.row_at_index(active as i32)?;
+    let allocation = row.allocation();
+    let adjustment = scroller.vadjustment();
+    let centered = f64::from(allocation.y()) + f64::from(allocation.height()) / 2.0
+        - adjustment.page_size() / 2.0;
+    let maximum = (adjustment.upper() - adjustment.page_size()).max(adjustment.lower());
+    Some(centered.clamp(adjustment.lower(), maximum))
+}
+
+fn is_current_centered(list: &ListBox, scroller: &ScrolledWindow, active: usize) -> bool {
+    centered_value(list, scroller, active)
+        .is_some_and(|centered| (scroller.vadjustment().value() - centered).abs() <= 12.0)
 }
 
 fn center_current(list: &ListBox, scroller: &ScrolledWindow, active: usize) {
-    let Some(row) = list.row_at_index(active as i32) else {
-        return;
-    };
-    let adjustment = scroller.vadjustment();
+    let list = list.clone();
+    let scroller = scroller.clone();
     glib::idle_add_local_once(move || {
-        let allocation = row.allocation();
-        let centered = f64::from(allocation.y()) + f64::from(allocation.height()) / 2.0
-            - adjustment.page_size() / 2.0;
-        let maximum = (adjustment.upper() - adjustment.page_size()).max(adjustment.lower());
-        adjustment.set_value(centered.clamp(adjustment.lower(), maximum));
+        if let Some(centered) = centered_value(&list, &scroller, active) {
+            scroller.vadjustment().set_value(centered);
+        }
     });
 }
 fn update_status(label: &Label, passages: &[Passage], current: usize, focus: FocusLevel) {
@@ -733,10 +794,9 @@ fn save(
         (current + 1) as f64 / passages.len() as f64
     };
     saved.percent = if chapter_count == 0 {
-        0
+        0.0
     } else {
-        (((saved.position.chapter as f64 + chapter_fraction) / chapter_count as f64) * 100.0)
-            .round() as usize
+        ((saved.position.chapter as f64 + chapter_fraction) / chapter_count as f64) * 100.0
     };
     if let Ok(store) = Store::open() {
         if let Err(error) = store.save(path, saved) {
@@ -746,7 +806,7 @@ fn save(
 }
 fn install_css() {
     let css = gtk::CssProvider::new();
-    css.load_from_data("window { background: #1d2021; color: #ebdbb2; } .passages { background: #1d2021; } row, row:focus, row:focus-visible, row:selected, .passage:focus, .passage:focus-visible { outline: none; border: none; box-shadow: none; background: transparent; } .passage { color: #ebdbb2; line-height: 1.45; } .heading { font-weight: 700; } .quote { border-left: 3px solid #928374; padding-left: 20px; } .dictionary-definition { font-size: 18px; line-height: 1.45; } .status { color: #a89984; font-size: 13px; }");
+    css.load_from_data("window { background: #1d2021; color: #ebdbb2; } .passages { background: #1d2021; } row, row:focus, row:focus-visible, row:selected, .passage:focus, .passage:focus-visible { outline: none; border: none; box-shadow: none; background: transparent; } .passage { color: #ebdbb2; line-height: 1.45; } .heading { font-weight: 700; } .quote { border-left: 3px solid #928374; padding-left: 20px; } .dictionary-definition, .dictionary-definition:focus, .dictionary-definition:focus-visible { font-size: 18px; line-height: 1.55; outline: none; border: none; box-shadow: none; } .status { color: #a89984; font-size: 13px; }");
     if let Some(display) = gdk::Display::default() {
         gtk::style_context_add_provider_for_display(
             &display,
@@ -765,9 +825,10 @@ mod tests {
         let output = clean_wordnet_output(
             "Overview of noun antipathy\n\nThe noun antipathy has 2 senses (first 1 from tagged texts)\n\n1. antipathy -- (a feeling of intense dislike)\n2. antipathy -- (the object of a feeling of intense aversion)",
         );
-        assert!(output.starts_with("1. antipathy"));
+        assert!(output.starts_with("1. a feeling of intense dislike"));
         assert!(!output.contains("Overview"));
         assert!(!output.contains("has 2 senses"));
+        assert!(!output.contains(" -- "));
     }
 
     #[test]

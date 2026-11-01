@@ -352,10 +352,13 @@ fn progress_label(state: ReadingState, chapters: usize) -> String {
         .chapter
         .saturating_add(1)
         .min(chapters.max(1));
-    format!(
-        "chapter {current}/{chapters}  ·  {}% of book",
-        state.percent
-    )
+    let chapter_floor = if chapters == 0 {
+        0.0
+    } else {
+        state.position.chapter as f64 * 100.0 / chapters as f64
+    };
+    let percent = state.percent.max(chapter_floor).min(100.0);
+    format!("chapter {current}/{chapters}  ·  {percent:.1}% of book")
 }
 
 fn load_preview_data(path: &Path) -> Result<PreviewData> {
