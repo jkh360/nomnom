@@ -154,6 +154,7 @@ fn build(
         &status,
         &passages.borrow(),
         current.get(),
+        chapter_count,
         state.borrow().focus,
     );
     center_current(
@@ -360,7 +361,13 @@ fn build(
                 );
             }
             center_current(&list, &scroller, visible_index(&passages.borrow(), next));
-            update_status(&status, &passages.borrow(), next, state.borrow().focus);
+            update_status(
+                &status,
+                &passages.borrow(),
+                next,
+                chapter_count,
+                state.borrow().focus,
+            );
             save(
                 &path,
                 &passages.borrow(),
@@ -590,6 +597,7 @@ fn show_definition(word: &str, parent: &gtk::Window) {
     let scroller = ScrolledWindow::builder()
         .hscrollbar_policy(PolicyType::Never)
         .vexpand(true)
+        .focusable(true)
         .child(&content)
         .build();
     let popup = gtk::Window::builder()
@@ -602,6 +610,7 @@ fn show_definition(word: &str, parent: &gtk::Window) {
         .build();
     let keys = EventControllerKey::new();
     let weak_popup = popup.downgrade();
+    let definition_content = content.clone();
     keys.connect_key_pressed(move |_, key, _, _| {
         let Some(popup) = weak_popup.upgrade() else {
             return glib::Propagation::Proceed;
@@ -612,7 +621,7 @@ fn show_definition(word: &str, parent: &gtk::Window) {
                 glib::Propagation::Stop
             }
             gdk::Key::d => {
-                if let Some(selected) = label_selection(&content)
+                if let Some(selected) = label_selection(&definition_content)
                     && let Some(word) = selected_word(&selected)
                 {
                     show_definition(word, &popup);
@@ -624,6 +633,8 @@ fn show_definition(word: &str, parent: &gtk::Window) {
     });
     popup.add_controller(keys);
     popup.present();
+    content.select_region(0, 0);
+    gtk::prelude::GtkWindowExt::set_focus(&popup, Some(&scroller));
 }
 
 fn dictionary_definition(word: &str) -> Option<String> {
@@ -710,16 +721,28 @@ fn center_current(list: &ListBox, scroller: &ScrolledWindow, active: usize) {
         }
     });
 }
-fn update_status(label: &Label, passages: &[Passage], current: usize, focus: FocusLevel) {
+fn update_status(
+    label: &Label,
+    passages: &[Passage],
+    current: usize,
+    chapter_count: usize,
+    focus: FocusLevel,
+) {
     if passages.is_empty() {
         label.set_text("No readable text");
         return;
     }
     let passage = &passages[current];
     let chapter = passage.chapter + 1;
-    let percent = ((current + 1) as f64 / passages.len() as f64 * 100.0).round() as usize;
+    let chapter_fraction = (current + 1) as f64 / passages.len() as f64;
+    let percent = if chapter_count == 0 {
+        0
+    } else {
+        (((passage.chapter as f64 + chapter_fraction) / chapter_count as f64) * 100.0).round()
+            as usize
+    };
     label.set_text(&format!(
-        "Chapter {chapter}: {}  ·  {} / {}  ·  {percent}%  ·  {}",
+        "Chapter {chapter}: {}  ·  {} / {}  ·  {percent}% of book  ·  {}",
         passage.chapter_title,
         current + 1,
         passages.len(),
@@ -794,9 +817,10 @@ fn save(
         (current + 1) as f64 / passages.len() as f64
     };
     saved.percent = if chapter_count == 0 {
-        0.0
+        0
     } else {
-        ((saved.position.chapter as f64 + chapter_fraction) / chapter_count as f64) * 100.0
+        (((saved.position.chapter as f64 + chapter_fraction) / chapter_count as f64) * 100.0)
+            .round() as usize
     };
     if let Ok(store) = Store::open() {
         if let Err(error) = store.save(path, saved) {
