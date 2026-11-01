@@ -35,7 +35,6 @@ pub struct Block {
 
 #[derive(Clone, Debug)]
 pub struct Chapter {
-    pub title: String,
     pub blocks: Vec<Block>,
 }
 
@@ -217,7 +216,7 @@ impl Epub {
     }
 }
 
-fn parse_chapter(source: &str, number: usize) -> Chapter {
+fn parse_chapter(source: &str, _number: usize) -> Chapter {
     let document = Html::parse_document(source);
     let selector =
         Selector::parse("h1, h2, h3, h4, h5, h6, p, blockquote, pre, li").expect("static selector");
@@ -251,12 +250,7 @@ fn parse_chapter(source: &str, number: usize) -> Chapter {
             });
         }
     }
-    let title = blocks
-        .iter()
-        .find(|block| block.kind == BlockKind::Heading)
-        .map(|block| block.text.clone())
-        .unwrap_or_else(|| format!("Chapter {number}"));
-    Chapter { title, blocks }
+    Chapter { blocks }
 }
 
 fn normalize_text(value: &str) -> String {
@@ -299,7 +293,6 @@ mod tests {
             "<html><body><h1>One</h1><blockquote><p>Hello <em>world</em>.</p></blockquote><p>Next.</p></body></html>",
             1,
         );
-        assert_eq!(chapter.title, "One");
         assert_eq!(chapter.blocks.len(), 3);
         assert_eq!(chapter.blocks[1].kind, BlockKind::Quote);
         assert_eq!(chapter.blocks[1].text, "Hello world .");

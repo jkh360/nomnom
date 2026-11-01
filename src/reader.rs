@@ -33,7 +33,6 @@ struct LoadedBook {
 
 struct Passage {
     chapter: usize,
-    chapter_title: String,
     block: usize,
     segment: usize,
     text: String,
@@ -150,13 +149,7 @@ fn build(
         current.get(),
         state.borrow().font_size,
     );
-    update_status(
-        &status,
-        &passages.borrow(),
-        current.get(),
-        chapter_count,
-        state.borrow().focus,
-    );
+    update_status(&status, &passages.borrow(), current.get(), chapter_count);
     center_current(
         &list,
         &scroller,
@@ -361,13 +354,7 @@ fn build(
                 );
             }
             center_current(&list, &scroller, visible_index(&passages.borrow(), next));
-            update_status(
-                &status,
-                &passages.borrow(),
-                next,
-                chapter_count,
-                state.borrow().focus,
-            );
+            update_status(&status, &passages.borrow(), next, chapter_count);
             save(
                 &path,
                 &passages.borrow(),
@@ -401,7 +388,6 @@ fn make_passages(chapter: &Chapter, chapter_index: usize, level: FocusLevel) -> 
         for (segment, text) in pieces.into_iter().enumerate() {
             passages.push(Passage {
                 chapter: chapter_index,
-                chapter_title: chapter.title.clone(),
                 block: block_index,
                 segment,
                 text,
@@ -721,19 +707,12 @@ fn center_current(list: &ListBox, scroller: &ScrolledWindow, active: usize) {
         }
     });
 }
-fn update_status(
-    label: &Label,
-    passages: &[Passage],
-    current: usize,
-    chapter_count: usize,
-    focus: FocusLevel,
-) {
+fn update_status(label: &Label, passages: &[Passage], current: usize, chapter_count: usize) {
     if passages.is_empty() {
         label.set_text("No readable text");
         return;
     }
     let passage = &passages[current];
-    let chapter = passage.chapter + 1;
     let chapter_fraction = (current + 1) as f64 / passages.len() as f64;
     let percent = if chapter_count == 0 {
         0
@@ -742,11 +721,9 @@ fn update_status(
             as usize
     };
     label.set_text(&format!(
-        "Chapter {chapter}: {}  ·  {} / {}  ·  {percent}% of book  ·  {}",
-        passage.chapter_title,
+        "{}/{}  ·  {percent}%",
         current + 1,
-        passages.len(),
-        focus.as_str()
+        passages.len()
     ));
 }
 fn passage_position(passages: &[Passage], index: usize) -> Position {
